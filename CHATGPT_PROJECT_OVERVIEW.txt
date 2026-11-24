@@ -1,0 +1,260 @@
+LLMOPS RAG APP - PROJECT OVERVIEW
+=================================
+
+Project
+-------
+Name: llmops-rag-app
+Type: Retrieval-Augmented Generation (RAG) application
+Language: Python 3.13
+Frameworks: LangChain and LangGraph
+Vector database: Chroma
+Embeddings: sentence-transformers/all-MiniLM-L6-v2
+Primary LLM: OpenAI GPT OSS 20B through Groq
+Evaluation framework: DeepEval
+
+
+Project structure
+-----------------
+LLMOPS-RAG-APP/
+|-- main.py
+|-- pyproject.toml
+|-- requirements.txt
+|-- README.md
+|-- data/
+|   |-- raw/              Original transcript and text files
+|   `-- processed/        Processed and cleaned text files
+|-- Saved-embeddings/     Persistent Chroma vector database
+|-- datasets/             Generated DeepEval datasets
+|-- src/
+|   |-- app/
+|   |   `-- rag_workflow.py
+|   |-- data/
+|   |   `-- generate_goldens.py
+|   `-- evals/
+`-- utils/
+    `-- transcript_utils.py
+
+
+How it works
+------------
+Raw transcripts
+      |
+      v
+Text cleaning
+      |
+      v
+Processed documents
+      |
+      v
+Text chunking
+      |
+      v
+Embedding model
+      |
+      v
+Chroma vector database
+      |
+      v
+Question retrieval
+      |
+      v
+Context + question sent to LLM
+      |
+      v
+Answer
+
+The RAG workflow:
+1. Loads text documents from the data/processed directory.
+2. Splits documents into chunks of 500 characters with 50-character overlap.
+3. Converts each chunk into an embedding.
+4. Stores the embeddings in Chroma.
+5. Retrieves the three most relevant chunks for a user's question.
+6. Sends the question and retrieved context to an LLM.
+7. Returns an answer based only on the provided context.
+
+
+Main RAG code
+-------------
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+loader = DirectoryLoader(
+    "./data/processed",
+    loader_cls=TextLoader,
+    show_progress=True
+)
+
+documents = loader.load()
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=500,
+    chunk_overlap=50
+)
+
+chunks = splitter.split_documents(documents)
+
+vector_store = Chroma(
+    collection_name="rag-demo",
+    embedding_function=embeddings,
+    persist_directory="./Saved-embeddings"
+)
+
+vector_store.add_documents(chunks)
+
+retriever = vector_store.as_retriever(
+    search_kwargs={"k": 3}
+)
+
+llm = ChatGroq(
+    model="openai/gpt-oss-20b",
+    temperature=0.1
+)
+
+
+class RAGState(TypedDict):
+    query: str
+    context: str
+    response: str
+
+
+def retrieve(state: RAGState):
+    documents = retriever.invoke(state["query"])
+    context = "\n\n".join(
+        document.page_content
+        for document in documents
+    )
+
+    return {"context": context}
+
+
+def generate(state: RAGState):
+    prompt = ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "Answer only using the provided context. "
+            "If the answer is not in the context, say 'I don't know'. "
+            "Do not hallucinate."
+        ),
+        (
+            "human",
+            "Context:\n{context}\n\nQuestion:\n{query}"
+        )
+    ])
+
+    chain = prompt | llm | StrOutputParser()
+
+    response = chain.invoke({
+        "context": state["context"],
+        "query": state["query"]
+    })
+
+    return {"response": response}
+
+
+workflow = StateGraph(RAGState)
+
+workflow.add_node("retrieve", retrieve)
+workflow.add_node("generate", generate)
+
+workflow.add_edge(START, "retrieve")
+workflow.add_edge("retrieve", "generate")
+workflow.add_edge("generate", END)
+
+app = workflow.compile()
+
+result = app.invoke({
+    "query": "What is regression testing?"
+})
+
+print(result["response"])
+
+
+Evaluation flow
+---------------
+Processed documents
+      |
+      v
+DeepEval Synthesizer
+      |
+      v
+Generate question-answer contexts
+      |
+      v
+Apply evolution strategies
+      |
+      v
+Save a JSON golden dataset
+
+The golden dataset script uses:
+- Synthetic input quality threshold: 0.6
+- Maximum quality retries: 1
+- Maximum contexts per document: 2
+- Context quality threshold: 0.7
+- Maximum three golden questions per context
+- Evolution strategies:
+  10 percent multi-context
+  30 percent concretizing
+  40 percent constrained
+  20 percent comparative
+
+The expected generated dataset location is:
+datasets/goldens/goldens_dataset.json
+
+
+Known code issue
+----------------
+In src/data/generate_goldens.py, this line is incorrect:
+
+get_docs_path[DOCS_PATH]
+
+It should call the function:
+
+get_docs_path(DOCS_PATH)
+
+
+Required environment variables
+------------------------------
+GROQ_API_KEY=your_groq_api_key
+OPENROUTER_API_KEY=your_openrouter_api_key
+
+OpenRouter is used by the DeepEval OpenRouter model.
+Groq is used by the ChatGroq RAG model.
+
+
+Suggested setup
+---------------
+1. Install Python 3.13.
+2. Create and activate a virtual environment.
+3. Install dependencies from pyproject.toml or requirements.txt.
+4. Add the API keys to a .env file.
+5. Place text documents in data/processed.
+6. Run the RAG workflow.
+7. Generate the DeepEval golden dataset.
+
+
+Recommended improvements
+------------------------
+- Fix and test src/data/generate_goldens.py.
+- Add a command-line interface with input for user questions.
+- Avoid re-adding documents to Chroma every time the workflow starts.
+- Deduplicate or clear the vector collection before ingestion.
+- Add document metadata such as filename and chunk number.
+- Add citations for retrieved source documents.
+- Track model latency, token usage, and retrieval quality.
+- Add retrieval evaluation and answer faithfulness evaluation.
+- Add unit tests for retrieval and generation.
+- Add a FastAPI or Streamlit interface.
+- Add Docker support for reproducible deployment.
+
